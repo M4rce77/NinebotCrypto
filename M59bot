@@ -1,0 +1,262 @@
+///////////////////////////////////////////////////////////////////////////////////////
+// Ninebot BLE Communication Sketch
+// by Joey Babcock - https://joeybabcock.me/blog/
+// edited by M4rce77
+// Scooter name: NBScooter0900
+// ------------------------------------------------------------------------------------
+
+#include "BLEDevice.h"
+
+#include <M5Core2.h>
+
+
+#ifndef NULL
+#define NULL 0
+#endif
+
+static BLEUUID serviceUUID("6E400001-B5A3-F393-E0A9-E50E24DCCA9E");
+static BLEUUID rxCharactaristicUUID("6E400002-B5A3-F393-E0A9-E50E24DCCA9E");
+static BLEUUID txCharactaristicUUID("6E400003-B5A3-F393-E0A9-E50E24DCCA9E");
+
+byte prefix[] =           {0x5A, 0xA5, 0x01, 0x3D, 0x20};
+byte writeReg[] =         {0x02};
+byte readReg[] =          {0x01};
+
+byte readBatteryLevel[] = {0x5a,0xa5,0x1,0xe2,0xfa,0xdd,0x1a,0x4,0x0,0x0,0x7d,0xff,0x0,0x0};
+byte readSpeed[] =        {0x5a,0xa5,0x1,0xe1,0xfa,0xdd,0x1e,0x4,0x0,0x0,0x78,0xff,0x0,0x0};
+byte readMileage[] =      {0x5a,0xa5,0x1,0xe1,0xfa,0xdd,0x11,0x2,0x0,0x0,0x73,0xff,0x0,0x0}; 
+byte readTotalMileage[] = {0x5a,0xa5,0x1,0xe1,0xfa,0xdd,0x11,0x2,0x0,0x0,0x73,0xff,0x0,0x0};
+byte readv[] =            {0x5a,0xa5,0x1,0xe2,0xfa,0xdd,0x7f,0x4,0x0,0x0,0x58,0xff,0x0,0x0}; 
+byte readtemp[] =         {0x5a,0xa5,0x1,0xe2,0xfa,0xdd,0x6,0x4,0x0,0x0,0x61,0xff,0x0,0x0}; 
+byte reada[] =            {0x5a,0xa5,0x1,0xe2,0xfa,0xdd,0x6b,0x4,0x0,0x0,0x4c,0xff,0x0,0x0};
+
+static boolean doConnect = false;
+static boolean connected = false;
+static boolean doScan = false;
+static boolean scanning = false;
+
+uint8_t* lastData;
+uint8_t batteryLevel;
+
+static BLERemoteCharacteristic* pRemoteRXCharacteristic;
+static BLERemoteCharacteristic* pRemoteTXCharacteristic;
+static BLEAdvertisedDevice* myDevice;
+
+int delayTime = 500;
+
+static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, uint8_t* pData, size_t length, bool isNotify) {
+    Serial.println("Recieved Data on TX: ");
+    Serial.print("{");
+    for(int i = 0; i < length; i++)
+    {
+      Serial.print("0x");
+      Serial.print(pData[i], HEX);
+      Serial.print(", ");
+    }
+    Serial.print("}");
+    Serial.println("");
+    lastData = pData;
+}
+
+class MyClientCallback : public BLEClientCallbacks {
+  void onConnect(BLEClient* pclient) {
+      //Nothing at the moment
+  }
+
+  void onDisconnect(BLEClient* pclient) {
+      connected = false;
+      Serial.println("onDisconnect");
+  }
+};
+
+bool connectToServer() {
+    Serial.print("Attempting a connection to ");
+    Serial.println(myDevice->getAddress().toString().c_str());
+    
+    BLEClient*  pClient  = BLEDevice::createClient();
+    Serial.println(" - Created client");
+
+    pClient->setClientCallbacks(new MyClientCallback());
+
+    // Connect to the remove BLE Server.
+    pClient->connect(myDevice);  // if you pass BLEAdvertisedDevice instead of address, it will be recognized type of peer device address (public or private)
+    Serial.println(" - Connected to server");
+    delay(1000);
+
+    // Obtain a reference to the service we are after in the remote BLE server.
+    BLERemoteService* pRemoteService = pClient->getService(serviceUUID);
+    if (pRemoteService == nullptr) {
+        Serial.print("Failed to find service UUID: ");
+        Serial.println(serviceUUID.toString().c_str());
+        pClient->disconnect();
+        return false;
+    }
+    Serial.println(" - Found service");
+
+
+    // Obtain a reference to the characteristic in the service of the remote BLE server.
+    pRemoteRXCharacteristic = pRemoteService->getCharacteristic(rxCharactaristicUUID);
+    pRemoteTXCharacteristic = pRemoteService->getCharacteristic(txCharactaristicUUID);
+    if (pRemoteRXCharacteristic == nullptr) {
+        Serial.print("Failed to find TX characteristic UUID: ");
+        Serial.println(rxCharactaristicUUID.toString().c_str());
+        pClient->disconnect();
+        return false;
+    }
+    if (pRemoteTXCharacteristic == nullptr) {
+        Serial.print("Failed to find TX characteristic UUID: ");
+        Serial.println(txCharactaristicUUID.toString().c_str());
+        pClient->disconnect();
+        return false;
+    }
+    
+    Serial.println(" - Found characteristics");
+
+    // Read the value of the characteristic.
+    if(pRemoteRXCharacteristic->canRead()) {
+      std::string value = pRemoteRXCharacteristic->readValue();
+      Serial.print("The characteristic value was: ");
+      Serial.println(value.c_str());
+    }
+
+    if(pRemoteTXCharacteristic->canNotify())
+    {
+        pRemoteTXCharacteristic->registerForNotify(notifyCallback);
+    }
+
+    connected = true;
+    return true;
+}
+
+class MyAdvertisedDeviceCallbacks: public BLEAdvertisedDeviceCallbacks {
+  void onResult(BLEAdvertisedDevice advertisedDevice) {
+    Serial.print("Advertised Device found: ");
+    Serial.println(advertisedDevice.toString().c_str());
+
+    if (advertisedDevice.haveServiceUUID() && advertisedDevice.isAdvertisingService(serviceUUID)) {
+      Serial.println("UART Device found!");
+      BLEDevice::getScan()->stop();
+      myDevice = new BLEAdvertisedDevice(advertisedDevice);
+      doConnect = true;
+      doScan = true;
+      scanning = false;
+    }
+  }
+};
+
+
+void setup() {
+
+
+  M5.begin();
+  M5.Lcd.setTextSize(3);
+  M5.Lcd.setCursor(50, 50);
+  M5.Lcd.print("Suche Ninebot");
+  BLEDevice::init("");
+  BLEScan* pBLEScan = BLEDevice::getScan();
+  pBLEScan->setAdvertisedDeviceCallbacks(new MyAdvertisedDeviceCallbacks());
+  pBLEScan->setInterval(1349);
+  pBLEScan->setWindow(449);
+  pBLEScan->setActiveScan(true);
+  pBLEScan->start(5, false);
+  scanning = true;
+  M5.Lcd.clear();
+}
+
+void loop() {
+  
+ 
+    if(scanning && !doScan)
+    {
+        BLEDevice::getScan()->stop();
+    }
+    else if(!doScan)
+    {
+        BLEDevice::getScan()->start(5, false);
+        delay(5000);
+    }
+    
+    if (doConnect == true) {
+        if(connectToServer()) {
+            Serial.println("Connected to Ninebot BLE Server.");
+            connected = true;
+        } 
+        else 
+        {
+            Serial.println("Failed to connect to Ninebot BLE Server.");
+        }
+        doConnect = false;
+    }
+
+    if (connected == true) {
+        uint8_t returnedData;
+        int calc;
+        
+                pRemoteRXCharacteristic->writeValue(readSpeed, sizeof(readSpeed));
+                delay(delayTime); // Give the scooter time to fetch the level
+                Serial.println("Speed:");
+                M5.Lcd.setCursor(0, 0);
+                M5.Lcd.print("Speed:");
+                returnedData = int(lastData[7]);
+                if(returnedData != NULL)
+                {
+                  Serial.println((float)returnedData / 10.0);
+                  M5.Lcd.setCursor(125, 0);
+                  M5.Lcd.print((float)returnedData / 10);
+                 delay(100);
+                }
+                
+                pRemoteRXCharacteristic->writeValue(readBatteryLevel, sizeof(readBatteryLevel));
+                delay(delayTime); // Give the scooter time to fetch the level
+                Serial.println("Battery Percentage:");
+                M5.Lcd.setCursor(0, 50);
+                M5.Lcd.print("Bat:");
+                returnedData = int(lastData[7]);
+                if(returnedData != NULL)
+                {
+                   Serial.println(returnedData);
+                   M5.Lcd.setCursor(125, 50);
+                   M5.Lcd.println(returnedData) ;
+                   delay(100);
+                }
+                pRemoteRXCharacteristic->writeValue(readTotalMileage, sizeof(readTotalMileage));
+                delay(delayTime); // Give the scooter time to fetch the level
+                Serial.println("Mileage(km):");
+                M5.Lcd.setCursor(0, 100);
+                M5.Lcd.print("KM:");
+                calc = int(lastData[7]) + (256 * int(lastData[8]));
+                if(calc != NULL)
+                {
+                  Serial.println((float)calc / 1000 );
+                  M5.Lcd.setCursor(125, 100);
+                  M5.Lcd.println((float)calc / 1000 );
+                   delay(100);
+                }
+                pRemoteRXCharacteristic->writeValue(readtemp, sizeof(readtemp));
+                delay(delayTime); // Give the scooter time to fetch the level
+                Serial.println("Temp");
+                M5.Lcd.setCursor(0, 150);
+                M5.Lcd.print("Temp:");
+                returnedData = int(lastData[7]);
+                if(returnedData != NULL)
+                {
+                  Serial.println((float)returnedData / 10);
+                  M5.Lcd.setCursor(125, 150);
+                  M5.Lcd.print((float)returnedData / 10);
+                 delay(100);
+                }
+                 pRemoteRXCharacteristic->writeValue(reada, sizeof(reada));
+                delay(delayTime); // Give the scooter time to fetch the level
+                Serial.println("A:");
+                M5.Lcd.setCursor(0, 200);
+                M5.Lcd.print("A:");
+                returnedData = int(lastData[7]);
+                if(returnedData != NULL)
+                {
+                  Serial.println((float)returnedData / 10);
+                  M5.Lcd.setCursor(125, 200);
+                  M5.Lcd.print((float)returnedData / 10);
+                 delay(100);
+                }
+                
+    }
